@@ -1,6 +1,8 @@
 from PIL import Image
 import numpy as np
 
+import pygame
+
 from transforms import *
 
 from debug import timer
@@ -79,15 +81,101 @@ def blend_background(colors, bg):
 
 
 
+def choose_transform():
+	pygame.init()
+	im = pygame.image.load(IMAGE_FILE)
+	x_size, y_size = im.get_size()
+	display = pygame.display.set_mode((x_size, y_size), pygame.HWSURFACE | pygame.DOUBLEBUF)
+
+	choosing = True
+
+	colors = [
+		# Original		Transform
+		(255, 0, 0), (200, 0, 0),
+		(0, 255, 0), (0, 200, 0),
+		(0, 0, 255), (0, 0, 200)]
+
+	# Original coordinates and transformed coordinates [o0, t0, ...]
+	coords = [None] * 6
+	current_coord = 0
+
+	while choosing:
+		for event in pygame.event.get():
+			if event.type == pygame.QUIT:
+				choosing = False
+			elif event.type == pygame.KEYDOWN:
+				if event.key == pygame.K_ESCAPE:
+					choosing = False
+				if event.key == pygame.K_RETURN:
+					for c in coords:
+						if c is None:
+							print('All 6 points needed for the transformation are not set.')
+							break
+					else:
+						choosing = False
+
+			elif event.type == pygame.MOUSEBUTTONUP:
+				if event.button == 1:
+					mouse_pos = np.array(pygame.mouse.get_pos())
+					i, pressed = pressed_circle([c for c in coords if c is not None], mouse_pos, 10)
+					if pressed is not None:
+						current_coord = i
+						coords[i] = None
+
+					elif 0 <= current_coord < 6:
+						coords[current_coord] = mouse_pos
+						for i, c in enumerate(coords):
+							if c is None:
+								current_coord = i
+								break
+						else:
+							current_coord = -1
+
+
+		
+
+		display.fill((0, 0, 0))
+		display.blit(im, (0, 0))
+
+		if 0 <= current_coord < 6:
+			pygame.draw.circle(display, colors[current_coord], pygame.mouse.get_pos(), 10)
+		for p, col in zip(coords, colors):
+			if p is not None:
+				pygame.draw.circle(display, col, p, 10)
+
+		pygame.display.update()
+
+	pygame.display.quit()
+	pygame.quit()
+
+	return [c for c in coords if c is not None]
+
+
+def pressed_circle(circles, pos, r):
+	for i, circle in enumerate(circles):
+		if np.sum((circle - pos)**2) < r*r:
+			return (i, circle)
+	return (None, None)
+
 
 
 def main():
+	# Choose the transform
+	coords = choose_transform()
+
+	if not len(coords) == 6:
+		print('Quiting early because not enough points were provided.')
+		quit()
+
+	coords = np.array([x + y * 1j for x, y in coords])
+
 	# Get image as a numpy array
 	im = load_image(IMAGE_FILE)
 
+
 	# Transform the image
 	#transform_func = mirror((1, 0), (0, im.shape[1] / 2))
-	transform_func = möbius(0, 512, 512, 512+512j, 512+512j, 512j)
+	transform_func = möbius(*coords)
 	#transform_func = mirror((1, 1), (im.shape[0] / 2, im.shape[1] / 2))
 	print('Calculation transformation...')
 	im_sequence = transform_image(im, transform_func)
