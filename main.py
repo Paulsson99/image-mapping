@@ -3,159 +3,175 @@ import numpy as np
 
 import pygame
 
-from transforms import *
+from image_transformations.transforms import möbius
+from image_transformations.transform import transform_pixel_positions, lerp_image
+from image_transformations.utils import lerp
 
-from debug import timer
+from utils.debug import timer
+from utils.image_utils import load_image, save_image_sequence
 
 IMAGE_FILE = 'images/py_logo.png'
 OUTPUT_FILE = 'images/transformed.gif'
 
-FRAME_COUNT = 100
-DURATION = 40 # ms
+class Transform_Image:
 
-BACKGROUND = np.array((0, 0, 0))
+	def __init__(self, im):
+		self.running = False
 
-def load_image(filename):
-	# Load the image as a numpy array (saved as [y, x, RGBA])
-	im = np.array(Image.open(filename).convert('RGBA'))
-	im = blend_background(im, BACKGROUND)
-	return im
-
-def save_image_sequence(im_sequence, filename):
-	images = [Image.fromarray(im) for im in im_sequence]		
-	images[0].save(filename, save_all=True, append_images=images[1:], optimize=False, duration=DURATION, loop=1)
-
-def get_grid(x_size, y_size):
-	x = np.arange(x_size)
-	y = np.arange(y_size)
-	xx, yy = np.meshgrid(x, y)
-	return np.column_stack((xx.flatten(), yy.flatten()))
-	#return np.array([(x, y) for x in range(x_size) for y in range(y_size)], dtype=int)
-
-@timer
-def transform_image(im, f):
-	y_size, x_size, color_size = im.shape
-
-	# Create a grid of points for every pixel in the image
-	grid = get_grid(x_size, y_size)
-
-	# Transform the grid
-	transformed_grid = f(grid)
-	
-	im_sequence = np.zeros((FRAME_COUNT, y_size, x_size, color_size), dtype=im.dtype)
-	for frame in range(FRAME_COUNT):
-		# Linear interpolation between grid and transformed grid
-		t = frame / (FRAME_COUNT - 1) if FRAME_COUNT > 1 else 1
-		frame_grid = lerp(grid, transformed_grid, t)
-
-		# Round to closest pixel coordinate
-		frame_grid = np.round(frame_grid).astype(int)
-
-		# Mask for all corinates within the image border
-		coord_in_range = valid_coordinates(frame_grid, 0, x_size, 0, y_size)
-
-		valid_transform = frame_grid[coord_in_range,:]
-		valid_grid = grid[coord_in_range,:]
-
-		# Set the new pixel colors
-		im_sequence[frame, valid_transform[:,1], valid_transform[:,0],:] = im[valid_grid[:,1], valid_grid[:,0], :]
-
-	return im_sequence
-
-def transform_grid(grid, f):
-	# Transform a grid with the function f and round to closest pixel
-	return f(grid)
-
-def valid_coordinates(grid, min_x, max_x, min_y, max_y):
-	x_coord_in_range = np.logical_and(min_x <= grid[...,0], grid[...,0] < max_x)
-	y_coord_in_range = np.logical_and(min_y <= grid[...,1], grid[...,1] < max_y)
-	return np.logical_and(x_coord_in_range, y_coord_in_range)
-
-def lerp(grid0, grid1, t):
-	return grid0 + (grid1 - grid0) * t
-
-def blend_background(colors, bg):
-	alpha = (colors[...,3] / 255)[...,np.newaxis]
-	new_color = colors[...,:3] * alpha + (1 - alpha) * bg
-	return np.round(new_color).astype(np.uint8)
-
-
-
-def choose_transform(im):
-	pygame.init()
-	im = pygame.surfarray.make_surface(im[...,:3])
-	x_size, y_size = im.get_size()
-	display = pygame.display.set_mode((x_size, y_size), pygame.HWSURFACE | pygame.DOUBLEBUF)
-
-	choosing = True
-
-	colors = [
-		# Original		Transform
-		(255, 0, 0), (200, 0, 0),
-		(0, 255, 0), (0, 200, 0),
-		(0, 0, 255), (0, 0, 200)]
-
-	# Original coordinates and transformed coordinates [o0, t0, ...]
-	coords = [None] * 6
-	current_coord = 0
-
-	while choosing:
-		for event in pygame.event.get():
-			if event.type == pygame.QUIT:
-				choosing = False
-			elif event.type == pygame.KEYDOWN:
-				if event.key == pygame.K_ESCAPE:
-					choosing = False
-				if event.key == pygame.K_RETURN:
-					for c in coords:
-						if c is None:
-							print('All 6 points needed for the transformation are not set.')
-							break
-					else:
-						choosing = False
-
-			elif event.type == pygame.MOUSEBUTTONUP:
-				if event.button == 1:
-					mouse_pos = np.array(pygame.mouse.get_pos())
-					i, pressed = pressed_circle([c for c in coords if c is not None], mouse_pos, 10)
-					if pressed is not None:
-						current_coord = i
-						coords[i] = None
-
-					elif 0 <= current_coord < 6:
-						coords[current_coord] = mouse_pos
-						for i, c in enumerate(coords):
-							if c is None:
-								current_coord = i
-								break
-						else:
-							current_coord = -1
-
-
+		self.clock = pygame.time.Clock()
 		
+		# Image
+		self.im = im
+		self.bg_image = pygame.surfarray.make_surface(im)
+		self.transformed_images = []
+		self.grid = None
+		self.transformed_grid = None
 
-		display.fill((0, 0, 0))
-		display.blit(im, (0, 0))
+		# Window
+		self.window = None
+		self.window_size = im.shape[:2]
 
-		if 0 <= current_coord < 6:
-			pygame.draw.circle(display, colors[current_coord], pygame.mouse.get_pos(), 10)
-		for p, col in zip(coords, colors):
-			if p is not None:
-				pygame.draw.circle(display, col, p, 10)
+		# Choose transform settings
+		self.is_placing_markers = True
+		self.active_marker = 0
+		self.marker_pos = []
+		self.marker_radius = 10
+		self.marker_colors = [
+			# Original		Transform
+			(255, 0, 0), (200, 0, 0),
+			(0, 255, 0), (0, 200, 0),
+			(0, 0, 255), (0, 0, 200)]
 
-		pygame.display.update()
+		# Animation
+		self.frames = 240
+		self.active_frame = 0
+		self.animation_frames = []
+		self.fps = 60
 
-	pygame.display.quit()
-	pygame.quit()
-
-	return [c for c in coords if c is not None]
 
 
-def pressed_circle(circles, pos, r):
-	for i, circle in enumerate(circles):
-		if np.sum((circle - pos)**2) < r*r:
-			return (i, circle)
-	return (None, None)
+	def start_app(self):
+		pygame.init()
+		self.window = pygame.display.set_mode(self.window_size, pygame.HWSURFACE | pygame.DOUBLEBUF)
+		self.running = True
+
+	def event_handler(self, event):
+		# Quit events
+		if event.type == pygame.QUIT:
+			self.running = False
+		elif event.type == pygame.KEYDOWN:
+			if event.key == pygame.K_ESCAPE:
+				self.running = False
+
+		# Enter event
+			elif event.key == pygame.K_RETURN:
+				if self.is_placing_markers:
+					if self.active_marker >= 6:
+						self.is_placing_markers = False
+						self.calc_transform()
+					else:
+						print('Only {} markers placed. To fully define a transform 6 are needed.'.format(len(self.marker_pos) - 1))
+
+		# Save event
+			elif event.key == pygame.K_s:
+				self.save()
+
+		# Click events
+		elif event.type == pygame.MOUSEBUTTONUP:
+			# Left click
+			if event.button == 1:
+				if self.is_placing_markers:
+					if self.active_marker >= 6:
+						if (marker := self.clicked_on_marker()) is not None:
+							self.active_marker = marker
+					else:
+						self.place_marker()
+
+
+	def update(self):
+		if self.is_placing_markers:
+			self.update_marker()
+		else:
+			self.update_animation()
+
+	def update_animation(self):
+		if len(self.transformed_images) < self.frames:
+			t = self.active_frame / (self.frames - 1)
+			im = lerp_image(self.grid, self.transformed_grid, self.im, t)
+			self.transformed_images.append(im)
+
+			self.animation_frames.append(pygame.surfarray.make_surface(im))
+
+	def update_marker(self):
+		# Cant have more than 6 markers
+		if not self.active_marker < 6:
+			return
+
+		# Append if active marker is not in the list of markers
+		if len(self.marker_pos) == self.active_marker:
+			self.marker_pos.append(np.array(pygame.mouse.get_pos()))
+		# Update the active marker
+		else:
+			self.marker_pos[self.active_marker] = np.array(pygame.mouse.get_pos())
+
+	def render(self):
+		if self.is_placing_markers:
+			self.render_settings()
+		else:
+			self.render_animation()
+		pygame.display.flip()
+
+	def render_settings(self):
+		self.window.blit(self.bg_image, (0, 0))
+		self.render_markers()
+
+	def render_animation(self):
+		self.window.blit(self.animation_frames[self.active_frame], (0, 0))
+		self.active_frame = (self.active_frame + 1) % self.frames
+
+	def render_markers(self, markers=None):
+		if markers is None:
+			markers = self.marker_pos
+		for marker, col in zip(markers, self.marker_colors):
+			pygame.draw.circle(self.window, col, marker, self.marker_radius)
+
+	def loop(self):
+		while self.running:
+			for event in pygame.event.get():
+				self.event_handler(event)
+
+			self.update()
+			self.render()
+
+			self.clock.tick(60)
+
+		self.quit_event()
+
+	def quit_event(self):
+		pygame.quit()
+
+	def place_marker(self):
+		# Place a marker and increase the index for the active marker
+		self.marker_pos[self.active_marker] = np.array(pygame.mouse.get_pos())
+		self.active_marker = len(self.marker_pos)
+
+	def clicked_on_marker(self):
+		mouse = np.array(pygame.mouse.get_pos())
+		for i, marker in enumerate(self.marker_pos):
+			if np.sum((marker - mouse)**2) < self.marker_radius**2:
+				return i
+		return None
+
+	def calc_transform(self):
+		complex_coords = [x + y * 1j for x, y in self.marker_pos]
+		self.grid, self.transformed_grid = transform_pixel_positions(self.im, möbius(*complex_coords))
+
+	def save(self):
+		if not len(self.transformed_images) == self.frames:
+			print('Only {}/{} images processed'.format(len(self.transformed_images), self.frames))
+			return
+		print('Saving image to {}'.format(OUTPUT_FILE))
+		save_image_sequence(self.transformed_images, OUTPUT_FILE, 1000 / self.fps)
 
 
 
@@ -163,33 +179,36 @@ def main():
 	# Get image as a numpy array
 	im = load_image(IMAGE_FILE)
 
-	# Choose the transform
-	coords = choose_transform(im)
-
-	if not len(coords) == 6:
-		print('Quiting early because not enough points were provided.')
-		quit()
-
-	coords = np.array([x + y * 1j for x, y in coords])
+	TIM = Transform_Image(im)
+	TIM.start_app()
+	TIM.loop()
 
 
+	# # Choose the transform
+	# coords = choose_transform(im)
 
-	# Transform the image
-	#transform_func = mirror((1, 0), (0, im.shape[1] / 2))
-	transform_func = möbius(*coords)
-	#transform_func = mirror((1, 1), (im.shape[0] / 2, im.shape[1] / 2))
-	print('Calculation transformation...')
-	im_sequence = transform_image(im, transform_func)
+	# if not len(coords) == 6:
+	# 	print('Quiting early because not enough points were provided.')
+	# 	quit()
 
-	# Save
-	print('Saving image to {}'.format(OUTPUT_FILE))
-	save_image_sequence(im_sequence, OUTPUT_FILE)
-	print('Done')
+	# coords = np.array([x + y * 1j for x, y in coords])
 
-	# Convert a numpy array into an image object
-	pil_img = Image.fromarray(im_sequence[-1])
-	# Show image
-	pil_img.show()
+	# # Transform the image
+	# #transform_func = mirror((1, 0), (0, im.shape[1] / 2))
+	# transform_func = möbius(*coords)
+	# #transform_func = mirror((1, 1), (im.shape[0] / 2, im.shape[1] / 2))
+	# print('Calculation transformation...')
+	# im_sequence = transform_image_to_sequence(im, transform_func, FRAME_COUNT)
+
+	# # Save
+	# print('Saving image to {}'.format(OUTPUT_FILE))
+	# save_image_sequence(im_sequence, OUTPUT_FILE, DURATION)
+	# print('Done')
+
+	# # Convert a numpy array into an image object
+	# pil_img = Image.fromarray(im_sequence[-1])
+	# # Show image
+	# pil_img.show()
 
 
 if __name__ == '__main__':

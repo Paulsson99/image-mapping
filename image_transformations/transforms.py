@@ -1,5 +1,5 @@
 import numpy as np
-from debug import timer
+from utils.debug import timer
 
 # TODO: Decorator?
 
@@ -16,7 +16,6 @@ def mirror(line, origin):
 		grid = np.matmul(s[:,np.newaxis], line[np.newaxis,:]) - grid
 		return grid + origin
 	return mirror_func
-
 
 def möbius(z1, w1, z2, w2, z3, w3):
 	# Calculate the möbius function h(z) defined by the cross ratio [z, z1, z2, z3]
