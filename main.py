@@ -17,12 +17,12 @@ BACKGROUND = np.array((0, 0, 0))
 
 def load_image(filename):
 	# Load the image as a numpy array (saved as [y, x, RGBA])
-	return np.array(Image.open(filename).convert('RGBA'))
+	im = np.array(Image.open(filename).convert('RGBA'))
+	im = blend_background(im, BACKGROUND)
+	return im
 
 def save_image_sequence(im_sequence, filename):
-	images = []
-	for im in im_sequence:
-		images.append(Image.fromarray(blend_background(im, BACKGROUND)))
+	images = [Image.fromarray(im) for im in im_sequence]		
 	images[0].save(filename, save_all=True, append_images=images[1:], optimize=False, duration=DURATION, loop=1)
 
 def get_grid(x_size, y_size):
@@ -81,9 +81,9 @@ def blend_background(colors, bg):
 
 
 
-def choose_transform():
+def choose_transform(im):
 	pygame.init()
-	im = pygame.image.load(IMAGE_FILE)
+	im = pygame.surfarray.make_surface(im[...,:3])
 	x_size, y_size = im.get_size()
 	display = pygame.display.set_mode((x_size, y_size), pygame.HWSURFACE | pygame.DOUBLEBUF)
 
@@ -160,8 +160,11 @@ def pressed_circle(circles, pos, r):
 
 
 def main():
+	# Get image as a numpy array
+	im = load_image(IMAGE_FILE)
+
 	# Choose the transform
-	coords = choose_transform()
+	coords = choose_transform(im)
 
 	if not len(coords) == 6:
 		print('Quiting early because not enough points were provided.')
@@ -169,8 +172,6 @@ def main():
 
 	coords = np.array([x + y * 1j for x, y in coords])
 
-	# Get image as a numpy array
-	im = load_image(IMAGE_FILE)
 
 
 	# Transform the image
